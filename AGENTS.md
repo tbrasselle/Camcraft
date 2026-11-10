@@ -34,6 +34,29 @@ afterwards - the work must not bother them.
   the roadmap is done (idle after a gate, waiting on nothing, end-of-turn
   with open items), spawn a continuation nudge subagent to remind the
   session to claim the next issue. A stall is a bug.
+- **Conflicted PRs are re-merged by their author; the maintainer
+  re-checks** (user, 2026-11-10: "a skill that is intended to recheck
+  current PR's with contributors name to deal with conflicts, usually
+  conflicts is a remerge from main or similar easy fix. Same skill should
+  also be used from a maintainers perspective to check if conflicts has
+  been resolved."). Merging moves `main`, so reviewed PRs keep turning
+  `conflicts` (orange). The skill `/resolve-conflicts` (`.claude/skills/
+  resolve-conflicts/`) handles both sides:
+  - **Contributor mode** (`/resolve-conflicts [login]`): for the author's
+    open conflicting PRs, merge main into each branch (never rebase or
+    force-push), keep both sides where both added lines, take main's
+    snapshot PNGs and changelog files, run the targeted gate, push, and
+    comment "ready for a re-check". If both sides changed the same logic,
+    or a safety rule could be dropped, stop and report the hunk instead
+    of guessing.
+  - **Maintainer mode** (`/resolve-conflicts check`): re-read every
+    `conflicts` PR. Still conflicting -> ask the author once. Clean again
+    -> drop `conflicts`, then restore `merge-ready` (head unchanged), send
+    it to a delta review (only a merge-of-main commit was added), or to a
+    full `/review-prs` review (new code).
+  Agents in a fork run contributor mode on their own PRs at the start of
+  each session, after the process-file sync; the maintainer runs `check`
+  after a batch of merges (e.g. after `/merge-ready`).
 - **Side work rides subagents.** All testing, documentation, and knowledge
   graphing (the graphify updates) are done by subagents dispatched as
   subtasks, never inline: their completion notification is what triggers
@@ -60,11 +83,22 @@ go to `CHANGELOG.md`.
   the same. The skill carries the `gh` mechanics (list limits, search
   syntax, heredoc bodies, closing keywords); this law stays the rule
   where the two differ.
-- **Pick.** `gh issue list --state open --search "-label:claimed -label:blocked -label:in-review -label:needs-research"`
+- **Pick.** `gh issue list --state open --search "-label:claimed -label:blocked -label:in-review -label:needs-research -label:\"P?\""`
   (then drop any whose comments hold a live contributor claim - "A claim
   comment is a claim", below) and take the highest priority first: `P0` (wrong output, gouge, crash,
   data loss) before `P1` (wrong behaviour a user hits) before `P2` (owed
   polish), then the oldest. User-reported bugs outrank owed work.
+- **`P?` is paused, not prioritised** (user, 2026-11-09: "a P? label that
+  holds an issue paused until maintainer tells it to be changed"). An issue
+  labelled `P?` is held by the maintainer: Pick never takes it, no lane
+  slot works it, no agent claims, researches, files sub-issues for or
+  re-prioritises it, and the bug/enhancement lanes skip it the same way.
+  It carries `P?` *instead of* a `P0`/`P1`/`P2` label, never beside one -
+  an agent that finds both reports it rather than choosing. Only the
+  maintainer swaps `P?` for a real priority (or closes the issue); until
+  then agents may only read it, link it, and comment facts that belong on
+  it (e.g. a duplicate or a related fix), without changing its labels.
+  An agent filing a new issue never uses `P?` - it picks `P0`/`P1`/`P2`.
 - **Two lanes, two issues each** (user, 2026-11-07: "open up the issue
   limit to 2 bugs 2 enhancements.. as we are now just working on the latest
   issues and not the old ones"). At most four issues are worked at once: two
@@ -92,6 +126,58 @@ go to `CHANGELOG.md`.
   outside the working folder u started up in?"), and are removed once their
   PR is pushed. One issue, one branch; every commit for it lands there, never
   on `main`.
+- **A fork syncs from upstream at each cut tag, not continuously** (user,
+  2026-11-09: "If we are on a forked repository (check for upstream), we
+  pull from upstream, with every detected cut tag ex. jump from 0.14 to
+  0.15, 0.15 to 0.16. The upstream pulls makes sure fork is working of the
+  latest stable main - and not the main that is in constant change.").
+  Before claiming work, check for an upstream: `git remote get-url
+  upstream` (a fork of NeoTech/Camcraft has one; the canonical repo does
+  not - there, "Start from the latest main" above applies unchanged). In a
+  fork:
+  - `git fetch upstream --tags` and find the newest cut tag,
+    `git tag -l 'v*.*.0' --sort=-v:refname | head -1`.
+  - If the fork's `main` does not contain it yet (`git merge-base
+    --is-ancestor <tag> main` fails), sync: `git switch main && git merge
+    --ff-only <tag>` (or `git merge <tag>` if the fork's main carries its own
+    commits), then `git push origin main`. Sync only to a cut tag, never to
+    `upstream/main`: tags are the tested, released state; upstream's main
+    moves several times an hour.
+  - Branch issue work from the fork's synced `main` as above. A PR into
+    upstream still targets upstream's `main`; if it conflicts there, merge
+    the conflicting upstream change into the branch (`git merge
+    upstream/main`) on that branch only, never into the fork's `main`. The
+    fork's `main` takes upstream's code only at the next cut tag; process
+    files are the one exception (next point).
+  - Note the tag the fork is on in the PR body ("fork synced at vX.Y.0").
+  - **Process files sync on every session, not only at tags** (user,
+    2026-11-10: "we need a way to inform all forks that there is changes
+    to skills and agents"). The process - `AGENTS.md`, `.claude/agents/`,
+    `.claude/skills/`, `scripts/gate.ps1`, `scripts/gate.sh` - changes
+    between releases, and a fork's agents must follow the current rules.
+    At the start of every session in a fork, before claiming work,
+    compare `git show upstream/main:.claude/PROCESS_VERSION` with the
+    local `.claude/PROCESS_VERSION`. If upstream's is higher, pull just
+    those files: `git checkout upstream/main -- AGENTS.md .claude/agents
+    .claude/skills .claude/PROCESS_VERSION scripts/gate.ps1
+    scripts/gate.sh`, commit as `chore(process): sync process files to
+    upstream PROCESS_VERSION <n>` on a `process-sync` branch, and merge
+    it into the fork's `main` (or open a PR there if the fork protects
+    main), then re-read AGENTS.md before going on. This is the one
+    exception to "sync only to a cut tag": process files don't change
+    product code, so the fork's code stays on the tag while its rules stay
+    current. What changed and why is in the pinned issue #681 ("Process
+    changes"); a fork maintainer subscribes there.
+- **Process changes bump `PROCESS_VERSION` and are announced** (same
+  request). Any PR that changes a process file (the list above) also
+  increments the single integer in `.claude/PROCESS_VERSION`, and when it
+  merges, the merging session adds a comment to the pinned issue #681:
+  `PROCESS_VERSION <n>` · PR #M · what changed · what a fork must do. The
+  reviewer treats a missing bump as a requested change. Two process PRs
+  open at once both bump to the same number; whichever merges second
+  takes the next number when it merges main. At a cut, the release notes
+  get a short "Process changes" section listing the versions since the
+  previous tag.
 - **Overlapping issues stack.** Open PRs wait unmerged (a `feat` until its
   cut, a fix until it is reviewed), so an
   issue touching code an open PR changes branches off that PR's branch
@@ -292,6 +378,13 @@ operation property panel.
 Systems and UI never write these fields ad hoc; they only respond to commands.
 If a UI change has no command for it, that's a bug - add one.
 
+**Commands ship with an MCP tool** (#128, #356). The MCP server lets an AI agent
+drive CamCraft headlessly. A PR that adds a user-facing command also adds its
+MCP tool (and script verb where it fits) in `crates/app/src/mcp/`, or files a
+`source:agent` follow-up issue `MCP: <command>` and names it in the PR body. MCP
+tools call the same undoable commands the GUI uses, so undo/redo history and
+invariants hold headlessly.
+
 Components are auto-registered: declare them in `crates/app/src/schema.rs`
 and the startup hook (`flecs_bits::register_schema`) handles the rest, in every
 binary. Current policy: components are Rust-owned types (`Vec`/`Box` fields),
@@ -436,6 +529,20 @@ not ride the split away: `#[test]` count before and after must match, and
 the ignored set keeps its golden asserts. UI snapshot binaries resolve their
 goldens from `crates/ui` - run them with that CWD.
 
+**Pixel snapshots are release-lane** (#255). The UI's PNG goldens
+(`crates/ui/tests/snapshots/*.png`) are `#[ignore]`d out of quick and
+batch and run only in the release tier's ui snapshot lane (debug,
+`--ignored snapshot`, CWD `crates/ui`). A PR never changes a snapshot
+PNG - not to "refresh" a conflict, not to accept a new render - and a
+`UPDATE_SNAPSHOTS=1` refresh on merge is no longer a habit: the goldens
+are regenerated once at the minor/major cut, in one commit on the release
+branch, after a human look at the `.diff.png`. What a snapshot guards is
+asserted in the default suite by its structural twin
+(`crates/ui/src/egui_app/tests/structural.rs`): AccessKit labels, roles,
+enabled/disabled state and window presence, plus the painted strips' text
+and coarse placement - text-only, so it holds on every OS and merges like
+code. A UI change updates those assertions, not the PNGs.
+
 `VisualRunner` is auto-enabled: windows show, run fast, and stay open if closed
 early; hidden runs cap at 30s; auto-close after 10s when no test is pending; on
 crash or timeout, the window is left open.
@@ -556,7 +663,10 @@ a tag"):
    `docs/decisions/*.md` to `RECOMMENDED.md` under a `vX.Y.Z` heading and
    removes them; it goes in the same docs commit). Write `RELEASE_NOTES.md`
    and the `CHANGELOG.md` rows for every PR merged since that tag (one per
-   behaviour PR, from its `Changelog:` line, plus any `Unreleased` rows), commit as `docs: X.Y.Z release notes;
+   behaviour PR, from its `Changelog:` line, plus any `Unreleased` rows).
+   The release notes also get a short "Process changes" section listing
+   each `PROCESS_VERSION` since the previous tag (taken from the pinned
+   issue #681). Commit all of it as `docs: X.Y.Z release notes;
    changelog`; then `scripts/release.ps1 -Version X.Y.Z -NoTag -Installer`
    - it runs the release gate tier on that tree (pass `-SkipGate` only if
    this exact tree already passed it), commits the version bump, builds
@@ -605,7 +715,9 @@ PR*s made by owner should be reviewd and tagged"); a fix PR merges once
 that review is clean, a `feat` or breaking PR at the cut (step 1 above).
 **Review labels**, one colour per state: green `merge-ready` (clean review
 and mergeable), red `needs-rework` (blockers), orange `conflicts` (no
-longer merges with `main`). On red or orange the reviewer turns one of our
+longer merges with `main`), yellow `needs-maintainer` (no blockers, but
+read, not built: a new dependency or a `build.rs` / scripts / `.github`
+change waits for the owner's decision). On red or orange the reviewer turns one of our
 own PRs back into a draft; a fork PR is left as its contributor set it,
 and the review comment says what to fix.
 

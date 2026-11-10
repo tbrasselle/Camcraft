@@ -3,7 +3,7 @@
 #
 #   scripts/gate.ps1 -Tier quick [-Base main]        tests the diff touches (test fns where it can)
 #   scripts/gate.ps1 -Tier batch                     every debug suite minus SLOW_BINARIES, ui, clippy
-#   scripts/gate.ps1 -Tier release                   everything, plus the --ignored heavy lanes in release
+#   scripts/gate.ps1 -Tier release                   everything, plus the --ignored heavy lanes in release and the ui snapshot lane
 #   scripts/gate.ps1 -Test <filter> [-Crate app] [-Binary name] [-Exact]   exactly the matching test(s)
 #   -DryRun prints the plan without running it. -Heavy lets quick run changed #[ignore]d fns (release --ignored). Logs: gate-logs/<tier>-<timestamp>/.
 [CmdletBinding()]
@@ -257,9 +257,12 @@ if ($Tier -eq 'batch') {
     Run-Clippy
     Summary
 }
-Write-Host 'release: every debug suite, ui, clippy, then the --ignored heavy lanes in release'
+Write-Host 'release: every debug suite, ui, clippy, then the --ignored heavy lanes in release and the ui snapshot lane'
 Run-Suites ($ALL_CRATES | Where-Object { $_ -ne 'ui' }) $false
 Run-Suites @('ui') $false
 Run-Clippy
 foreach ($d in @('motion', 'app')) { Step "$d heavy lane (release --ignored)" @('test', '--release', '-j', $J, '-p', (Pkg $d), '--no-fail-fast', '--', $T, '--ignored') }
+# The ui pixel snapshot goldens (#255): #[ignore]d out of quick/batch, run here only, debug like the goldens
+# were made, CWD crates/ui so they resolve tests/snapshots/. Regenerate at the cut with UPDATE_SNAPSHOTS=1.
+Step 'ui snapshot lane (debug --ignored, cwd crates/ui)' @('test', '-j', $J, '-p', (Pkg 'ui'), '--lib', '--no-fail-fast', '--', $T, '--ignored', 'snapshot') (Cwd-Of 'ui')
 Summary

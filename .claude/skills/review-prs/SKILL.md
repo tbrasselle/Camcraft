@@ -92,12 +92,27 @@ we can find em"):
 | `merge-ready` | green | review clean AND merges cleanly with main - the owner can merge now |
 | `needs-rework` | red | the review found blocking items |
 | `conflicts` | orange | conflicts with main - needs a branch refresh (`git merge origin/main`) |
+| `needs-maintainer` | yellow | reviewed, no blockers, but the owner must decide first: a new dependency, or a `build.rs` / scripts / `.github` change the reviewer reads and does not build ("Not built - needs a maintainer look") |
+
+`needs-maintainer` (user, 2026-11-09: "that needs-maintainer needs to
+into the skill right?") gives the "Not built - needs a maintainer look"
+verdict a label. Without it such a PR carried none and looked unreviewed
+on the PR list. The owner removes it after deciding: on a yes it becomes
+`merge-ready`, or is built and reviewed in full first; on a no it is
+closed or gets `needs-rework`.
 
 After posting the review, read `gh pr view <N> --json mergeable`
 (re-read once if it says `UNKNOWN`):
-- clean review + `MERGEABLE` -> add `merge-ready`, remove `needs-rework` and `conflicts`;
-- clean review + `CONFLICTING` -> add `conflicts`, remove `merge-ready` (never green while it conflicts);
-- blocking review -> add `needs-rework`, remove `merge-ready`; also add `conflicts` if it conflicts.
+- clean review + `MERGEABLE` -> add `merge-ready`, remove `needs-rework`, `conflicts` and `needs-maintainer`;
+- clean review + `CONFLICTING` -> add `conflicts`, remove `merge-ready` and `needs-maintainer` (never green while it conflicts);
+- blocking review -> add `needs-rework`, remove `merge-ready` and `needs-maintainer`; also add `conflicts` if it conflicts;
+- "Not built - needs a maintainer look" with no blockers -> add `needs-maintainer`, remove `merge-ready` and `needs-rework`; also add `conflicts` if it conflicts. With blockers it is `needs-rework` as above, and the comment still names the owner's decision.
+
+A PR that changes `crates/ui/tests/snapshots/*.png` is a blocking review
+(`needs-rework`): the pixel goldens are release-lane and are regenerated
+only at the cut (AGENTS.md "Pixel snapshots are release-lane", #255). The
+fix is to drop the PNG changes and update the structural assertions
+instead.
 
 A red or orange verdict also turns the PR back into a draft
 (`gh pr ready <N> --undo`): the author fixes it there, pushes, and flags it
@@ -110,6 +125,60 @@ Whoever refreshes a branch re-reads `mergeable` after the push: once it is
 was clean. Merging a PR can turn others `CONFLICTING`, so each run also
 re-checks every open PR labelled `merge-ready` and swaps any that now
 conflict to `conflicts`.
+
+## 2c. Token cost comment - when a PR turns merge-ready
+
+When a review ends with the PR labelled `merge-ready` (step 2b), the
+dispatcher (this skill's caller, not the reviewer - only the caller sees
+the agent's usage) posts one more PR comment with the estimated token
+cost of getting that PR to merge-ready (user, 2026-11-10: "an average
+token cost should be added as comment to each review based when its
+merge ready").
+
+- **What counts:** every agent run on this PR that the caller dispatched,
+  plus the merge-ready review itself - each review and re-review
+  (`PR-reviewer`), conflict-resolution or replacement-branch agents, and
+  the fix agent for our own issue PRs. Take each run's token total from
+  its completion notification (`subagent_tokens`) and its model. The
+  caller's own main-session turns aren't attributable per PR and are not
+  counted - say so.
+- **Rate:** usage reports one total, not an input/output split, so
+  estimate it as 90 % input and 10 % output at list price - a blended
+  upper estimate (cache reads, billed at about a tenth of input, make the
+  real cost lower). Blended per million tokens: Opus 5.5 about $5.60,
+  Sonnet 5.5 about $2.80, Haiku 5.5 about $0.14. When list prices change,
+  update these numbers from the `claude-api` skill's model table.
+- **Comment shape** (one comment, first line is the marker so it's never
+  posted twice for the same head):
+
+  ```
+  <!-- review-cost: <head sha> -->
+  **Estimated agent cost to merge-ready:** ~$X.XX (N tokens)
+  | Run | Model | Tokens | Est. cost |
+  |---|---|---|---|
+  | review | Sonnet 5.5 | 71k | ~$0.20 |
+  | conflict fix (replacement #M) | Opus 5.5 | 64k | ~$0.36 |
+  Blended upper estimate (90 % input / 10 % output at list price; cache
+  reads make the real cost lower). Main-session coordination isn't
+  counted.
+  ```
+- A run whose token total isn't known (e.g. a review from another
+  session) is listed as "not known" and left out of the sum.
+- No cost comment for `needs-rework`, `conflicts` or `needs-maintainer`
+  verdicts; the next review that ends `merge-ready` sums every run on
+  the PR so far (earlier rounds included).
+
+## 2d. Process PRs - version bump and announcement
+
+A PR that changes a process file (`AGENTS.md`, `.claude/agents/`,
+`.claude/skills/`, `scripts/gate.ps1`, `scripts/gate.sh`) must increment
+the integer in `.claude/PROCESS_VERSION` (AGENTS.md "Process changes bump
+`PROCESS_VERSION`"). The reviewer checks this; a missing bump is a
+requested change (`needs-rework`). When such a PR merges, whoever merges
+it comments on the pinned issue #681 (Process changes):
+`PROCESS_VERSION <n>` · PR #M · what changed · what a fork must do (usually
+"pull the process files", the command in the issue body). That comment is
+how fork maintainers subscribed to #681 hear about it.
 
 ## 3. Report
 
@@ -139,6 +208,9 @@ For each line `<N> <login> <time>`:
   `<time>`: skip silently. A withdrawn claim's old comment is never
   mirrored again (without this the Withdraw pass and this one would flip
   the label every run);
+- **paused issue** (labelled `P?` - AGENTS.md "`P?` is paused"): do not
+  mirror; reply once (only if no later comment mentions `@<login>`)
+  `This issue is paused by the maintainer (P?) - it isn't open for work yet; the claim isn't recorded. It will be once the maintainer sets a priority.`;
 - **closed issue**, or **already mirrored** (`claimed` set and `<login>`
   assigned, or `claimed` set and a "Claim recorded for @<login>" reply
   exists): skip silently;

@@ -5,7 +5,7 @@
 #
 #   scripts/gate.sh quick [base]          suites of the crates the diff touches (vs merge-base with base, default main)
 #   scripts/gate.sh batch                 every debug suite minus SLOW_BINARIES, ui, clippy
-#   scripts/gate.sh release               everything, plus the --ignored heavy lanes in release
+#   scripts/gate.sh release               everything, plus the --ignored heavy lanes in release and the ui snapshot lane
 #   scripts/gate.sh test <filter> [crate] [--exact] [--ignored]   tests whose name matches, in one crate or all
 #   DRY_RUN=1 prints the plan without running it. Logs: gate-logs/<tier>-<timestamp>/.
 #
@@ -163,9 +163,12 @@ if [ "$TIER" = batch ]; then
     summary
 fi
 [ "$TIER" = release ] || { echo "unknown tier '$TIER' (quick | batch | release | test)"; exit 2; }
-echo "release: every debug suite, ui, clippy, then the --ignored heavy lanes in release"
+echo "release: every debug suite, ui, clippy, then the --ignored heavy lanes in release and the ui snapshot lane"
 for d in $ALL_CRATES; do [ "$d" = ui ] || run_suites 0 "$d"; done
 run_suites 0 ui
 run_clippy
 for d in motion app; do step "$d heavy lane (release --ignored)" "$ROOT" test --release -j $J -p "camcraft-$d" --no-fail-fast -- $T --ignored; done
+# The ui pixel snapshot goldens (#255): #[ignore]d out of quick/batch, run here only, debug like the goldens
+# were made, CWD crates/ui so they resolve tests/snapshots/. Regenerate at the cut with UPDATE_SNAPSHOTS=1.
+step "ui snapshot lane (debug --ignored, cwd crates/ui)" "$(cwd_of ui)" test -j $J -p camcraft-ui --lib --no-fail-fast -- $T --ignored snapshot
 summary
