@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: close-after-push
+expected_outcome: |
+  Verifies #17's state with gh issue view --json state rather than closing by hand; removes a claimed label if present; comments with the commit, the pinning test and the release it ships in; does not use gh issue close unless the issue is still open after the push, and then explains why.

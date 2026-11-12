@@ -28,7 +28,8 @@ fork, `upstream` is NeoTech/Camcraft and `origin` is the fork).
 - Never force-push and never rebase. Always `git merge` (merge commits keep
   the hashes reviews and comments refer to).
 - Never build in the main checkout. Work in a worktree under
-  `.claude/worktrees/` with its own `CARGO_TARGET_DIR`; remove both when done.
+  `.claude/worktrees/` with its own `target/` (the worktree default, no `CARGO_TARGET_DIR` env var - it defeats the shared compile cache); remove both when done.
+- Build cache: Prefer `cargo xtask gate ...` (it turns the compile cache on); for a direct cargo call set `RUSTC_WRAPPER=sccache` only when `sccache` is on PATH (cargo fails if the wrapper is missing), and never export `CARGO_TARGET_DIR`.
 - A PR flagged ready and labelled `merge-ready` takes no pushes (AGENTS.md
   "Every PR opens as a draft"). A conflicting PR has already lost
   `merge-ready` (the label is `conflicts`), so pushing a merge to it is
@@ -85,7 +86,9 @@ then merge A's fixed branch into B before main.
      be dropped by a resolution - when in doubt, it's this case.
 4. **Check nothing from main was dropped:** `git diff upstream/main --stat`
    must list only the PR's own files.
-5. **Targeted gate** (AGENTS.md "Test the change"): build the touched
+5. **Targeted gate** (AGENTS.md "Test the change"): `cargo xtask gate
+   quick --base upstream/main` on any OS (wrappers `scripts/gate.ps1` /
+   `gate.sh` forward to it), or by hand: build the touched
    crates; run the test binaries of the files that conflicted plus the
    PR's own pinning tests; `cargo clippy -p <touched crates> --all-targets
    -- -D warnings`. UI tests with CWD `crates/ui`. Run in the foreground
