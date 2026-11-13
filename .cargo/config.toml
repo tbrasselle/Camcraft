@@ -1,0 +1,4 @@
+# `cargo xtask <task>` runs the workspace's own process tooling (xtask/, #748): the gate tiers and the
+# decision collection, one implementation on Windows, macOS and Linux.
+[alias]
+xtask = "run -p xtask --"

@@ -42,21 +42,83 @@ afterwards - the work must not bother them.
   been resolved."). Merging moves `main`, so reviewed PRs keep turning
   `conflicts` (orange). The skill `/resolve-conflicts` (`.claude/skills/
   resolve-conflicts/`) handles both sides:
-  - **Contributor mode** (`/resolve-conflicts [login]`): for the author's
-    open conflicting PRs, merge main into each branch (never rebase or
-    force-push), keep both sides where both added lines, take main's
+  - **Contributor mode** (`/resolve-conflicts [login]`): for the PR the merge
+    batch is about to merge, the one PR the author names, or one the author
+    is pushing a review fix to anyway (not every conflicting PR at once,
+    see "Refresh only at merge time"), merge main into the branch (never
+    rebase or force-push), keep both sides where both added lines, take main's
     snapshot PNGs and changelog files, run the targeted gate, push, and
     comment "ready for a re-check". If both sides changed the same logic,
     or a safety rule could be dropped, stop and report the hunk instead
     of guessing.
   - **Maintainer mode** (`/resolve-conflicts check`): re-read every
-    `conflicts` PR. Still conflicting -> ask the author once. Clean again
-    -> drop `conflicts`, then restore `merge-ready` (head unchanged), send
-    it to a delta review (only a merge-of-main commit was added), or to a
-    full `/review-prs` review (new code).
+    `conflicts` PR. Still conflicting -> leave it, and ask the author once
+    only when it is in the batch about to merge (see "Refresh only at merge
+    time"). Clean again -> drop `conflicts`, then restore `merge-ready`
+    (head unchanged, or only a clean merge of main was added - see "A clean
+    merge of main keeps its review"), send it to a delta review (a conflict
+    was resolved by hand), or to a full `/review-prs` review (new code).
   Agents in a fork run contributor mode on their own PRs at the start of
   each session, after the process-file sync; the maintainer runs `check`
-  after a batch of merges (e.g. after `/merge-ready`).
+  after a batch of merges (e.g. after `/merge-ready`). (Superseded since
+  2026-11-12: contributor mode is no longer a start-of-session duty; a
+  conflicting PR is refreshed at merge time, see "Refresh only at merge
+  time" below. The maintainer's `check` after a merge batch stands.)
+- **Refresh only at merge time** (user, 2026-11-12, decided in the question
+  dialog as "Refresh only at merge time", issue #1221: "We need to maybe
+  modify the merge-ready skill to be better at analyzing merge-order and
+  batch how the PR's are going in to generate as little delta pr's as
+  possible. we spend a shit ton of tokens on uncessary deltas." and "Stop
+  the other sessions work as well for now until we can figure out how it
+  stops causing conflicts"). A conflicting PR carries `conflicts` and is
+  otherwise left alone: by its author's agents, by maintenance, by
+  reviewers. It takes `git merge origin/main` only when it is the next PR
+  in a merge batch, or when its author pushes a review fix anyway and
+  chooses to. The merging session collects the ready PRs and runs
+  `cargo xtask merge-plan <PR>...` (or `--label merge-ready`). The planner
+  simulates the merges with `git merge-tree` (nothing is checked out,
+  built or pushed) and orders them: wave 1 merges as one batch with no
+  refresh and no delta review; wave 2 is refreshed one PR at a time, each
+  merged before the next is refreshed, against the main of that moment.
+  The `/resolve-conflicts` contributor mode is the tool for that refresh.
+- **A clean merge of main keeps its review** (issue #1221, 2026-11-12).
+  If every commit since the reviewed head is a merge of `main` whose
+  `git show --remerge-diff` is empty, the tree is exactly what merging the
+  reviewed head would give: the review stands and the label is restored
+  without an agent, and no delta review runs. `cargo xtask merge-plan
+  --delta <PR> --reviewed <sha>` reports it (SAME). Hand edits confined to
+  rule-settled files (`.claude/PROCESS_VERSION`, `CHANGELOG.md`,
+  `RECOMMENDED.md`, `Cargo.lock`, snapshot PNGs taken from main) are read by
+  the merging session itself (MECHANICAL). Only a conflict resolved by hand
+  gets a delta review of its remerge-diff (DELTA), and new commits get a
+  review of those commits (NEW CODE).
+- **Only collaborators' reviews count** (issue #1320, 2026-11-12, decided in
+  the question dialog: "Any collaborator review counts"; the maintainer in
+  chat: "everyone counts. everyone needs to get merged, mkinney and i are
+  coolaboration across the world on the same code base"). A
+  `<!-- pr-reviewer: ... -->` or `<!-- review-cost: ... -->` marker counts
+  only in a review or comment made by a collaborator of the repository the
+  PR targets (`NeoTech/Camcraft`, also in a fork): an account with write
+  access, `gh api repos/NeoTech/Camcraft/collaborators --jq '.[] |
+  select(.permissions.push) | .login'`. `merge-ready` counts only when a
+  collaborator set it. This holds for a collaborator's own PRs as well as
+  others'; the independence that still applies is the one above, that the
+  review is done by an agent that did not write the change. A marker or label
+  from an account that is not a collaborator does not count: a
+  contributor's pre-check is a plain comment without the marker.
+  A review that requests changes on a head stays open until it is addressed:
+  by a new head that a collaborator's review then clears, or by the reviewer
+  who asked withdrawing the request in a comment. A `merge-ready` label or a
+  "ready" review from another collaborator on the same head does not
+  override it. A PR whose current head carries both a collaborator review
+  requesting changes and a `merge-ready` label (or `merge-ready` beside
+  `needs-rework`) is a disagreement: `/merge-ready` reports it and does not
+  offer it; no agent removes either label; the two collaborators settle it
+  on the PR.
+  `/review-prs`, `/resolve-conflicts check`, `/merge-ready` and the
+  PR-reviewer agent all filter on the collaborator list. (Superseded since
+  2026-11-12, later the same day: issue #1207's "only the owner's reviews
+  count", "No, only ours count", which counted the owner's account alone.)
 - **Side work rides subagents.** All testing, documentation, and knowledge
   graphing (the graphify updates) are done by subagents dispatched as
   subtasks, never inline: their completion notification is what triggers
@@ -111,7 +173,7 @@ go to `CHANGELOG.md`.
   - `P1`-`P3` are fix-now work and are for defects only: "wanted" is never
     a reason for them. Only `P1` and `P2` hold a release cut back
     (maintainer's choice, question dialog, 2026-11-12: "only P1 and P2
-    block a release cut"). A minor/major cut does not start while any `P1` or `P2` issue is open; a `P3` or lower never holds one. A `P3` is worked ahead of planned
+    block a release cut"). A minor/major cut does not start while any `P1` or `P2` issue is open; a `P3` or lower never holds one. The check is made once, when the cut starts (release step 1); a `P1` or `P2` filed after that does not restart the cut (#1424). A `P3` is worked ahead of planned
     work, but a cut does not wait for it.
   - `P4` is set only where the maintainer asked for the work in his own
     words; the issue quotes them.
@@ -202,7 +264,8 @@ go to `CHANGELOG.md`.
     `.cargo/config.toml` (its `cargo xtask` alias), and the wrappers that
     forward to it - `scripts/gate.ps1`, `scripts/gate.sh`,
     `scripts/release.ps1`, `scripts/collect-decisions.ps1`,
-    `scripts/collect-decisions.sh` - changes between releases, and a fork's
+    `scripts/collect-decisions.sh`, and `crates/ui/AGENTS.md` (the UI
+    steering document, #1121) - changes between releases, and a fork's
     agents must follow the current rules.
     At the start of every session in a fork, before claiming work,
     compare `git show upstream/main:.claude/PROCESS_VERSION` with the
@@ -210,7 +273,7 @@ go to `CHANGELOG.md`.
     those files: `git checkout upstream/main -- AGENTS.md .claude/agents
     .claude/skills .claude/PROCESS_VERSION xtask .cargo/config.toml
     scripts/gate.ps1 scripts/gate.sh scripts/release.ps1
-    scripts/collect-decisions.ps1 scripts/collect-decisions.sh`, commit as `chore(process): sync
+    scripts/collect-decisions.ps1 scripts/collect-decisions.sh crates/ui/AGENTS.md`, commit as `chore(process): sync
     process files to upstream PROCESS_VERSION <n>` on a `process-sync`
     branch, and merge
     it into the fork's `main` (or open a PR there if the fork protects
@@ -432,6 +495,19 @@ go to `CHANGELOG.md`.
   finding, a needed `git merge origin/main` or any other change first turns
   it back into a draft (`gh pr ready <M> --undo`), says why in a PR
   comment, is pushed and re-gated, and only then is flagged ready again.
+  Superseded since 2026-11-12 for the merge-time refresh only (the
+  maintainer's decision in the question dialog, "Refresh only at merge
+  time", issue #1221): a refresh that is only a merge of main with no hand
+  edits (`cargo xtask merge-plan --delta` says SAME) is not new work on the
+  PR, so the review stands and the refresh is pushed without the draft
+  round-trip. A merge-time refresh with hand edits (MECHANICAL after the
+  merging session's own read, or DELTA) is new work: a ready PR goes back to
+  draft first, is pushed, and is reviewed as usual. Either way the merging
+  session flags the PR ready again right before merging it (`gh pr ready
+  <M>`), with one PR comment naming the class (SAME, MECHANICAL or DELTA) and
+  the review it stands on, and nothing is pushed after that flag. A PR under
+  an orange `conflicts` verdict is a draft (review-prs), so that flag is what
+  makes it mergeable again.
   Merging (by the main session for fix/docs PRs, at the cut for `feat`)
   takes only a ready PR, never a draft.
 - **Never close by hand without a commit**, except: a duplicate (link the
@@ -546,6 +622,8 @@ must carry a delete hook that frees everything it owns.
 
 ## Assets
 
+UI work also follows `crates/ui/AGENTS.md` (the UI steering document; it restates the laws here, nothing more).
+
 `assets/ui/` holds PNGs for toolbar and tree icons; `assets/ui/fonts/` holds
 the fonts. The UI must render them — loading the files alone isn't enough;
 wired-in usage in each panel's draw code is required.
@@ -601,6 +679,22 @@ Phase 4 refactors the codebase for reuse; work in the shape it is heading to:
   goes in the module that will become its crate's seed, and cross-domain
   calls go through the seams that will become crate APIs - not through
   private helpers of another domain.
+- **`app` holds the document, nothing else** (maintainer, 2026-11-11: "high
+  cohesion, low coupling, because every gate is costly"). New code goes in
+  `crates/app/src` only if it reads or writes the ECS world, the project
+  file, a command, MCP or the CLI. Code that works only on domain values
+  (cl, geometry, tools, post, sim, motion types) goes in the crate that owns
+  them, and `app` re-exports it. A reviewer checks this from the new file's
+  `use` lines: if none names one of those five things, the file is in the
+  wrong crate.
+- **No new dependency between our crates without a decision.** A
+  `camcraft-*` entry added to `[dependencies]` or `[dev-dependencies]` in any
+  `crates/*/Cargo.toml` needs a `docs/decisions/` entry in the same PR. The
+  entry lists the imported items, says why the caller cannot pass the value
+  in instead (a parameter, a closure, a recorded file), and names what now
+  rebuilds when the dependency changes. An edge that would carry fewer than
+  five items is not added: the caller passes the value in. (The wording of
+  the five-item clause is the maintainer's to confirm.)
 - **Stays buildable everywhere.** No platform-specific assumptions in core
   code (M4.2 ships Windows/Linux/macOS builds from the same source).
 - **Neutral naming.** M4.3 renamed the product label hsmworks to camcraft
@@ -611,10 +705,20 @@ Phase 4 refactors the codebase for reuse; work in the shape it is heading to:
 
 ## Testing
 
-`crates/app/tests/` (app + commands) and `crates/ui/tests/` (UI/event tests
-which spawn the real app via `test_harness.rs`; helpers in `ui::test_harness`,
-app-level fixtures in `crates/app/tests/common/mod.rs`). Each future subcrate
-carries its own tests inside its crate (M4.1).
+`crates/app/tests/` (tests of what `crates/app/src` defines: commands, the
+project file, the schema, operations, MCP and the CLI) and `crates/ui/tests/`
+(UI/event tests which spawn the real app via `test_harness.rs`; helpers in
+`ui::test_harness`, app-level fixtures in `crates/app/tests/common/mod.rs`).
+Each future subcrate carries its own tests inside its crate (M4.1).
+
+- **A test lives with the code it tests.** A new test file goes in the lowest
+  crate that provides everything it imports, and its Gate map names that
+  crate (`camcraft_post::post::engine`, not `app::post`). A file in
+  `crates/app/tests/` must import something `crates/app/src` defines; a test
+  that uses only another crate's re-exports (`app::post`, `app::verify`,
+  `app::machining2d`) belongs in that crate's `tests/`. A test that needs
+  another crate's output reads a recorded file (`.cl`, `.cnc`) rather than
+  importing that crate's generator.
 
 **Three gate tiers - never hours per change** (user, 2026-11-07: "break up
 those test suites so we don't have to run hours on hours of tests"). One
@@ -631,9 +735,11 @@ gate <tier>`, from the workspace's `xtask/` crate. `scripts/gate.ps1`
    every debug suite except those tagged slow, the ui suites from
    `crates/ui`, clippy (`cargo xtask gate batch`). No release-mode heavy
    lanes.
-3. **release** (only at a cut, run locally): everything - all debug
-   suites, the `--ignored` heavy lanes in release (`cargo xtask gate
-   release`).
+3. **release** (only at a cut): everything - all debug suites, the
+   `--ignored` heavy lanes in release (`cargo xtask gate release`). Since
+   #1413 it runs on the self-hosted Linux cut runner through `cut.yml`
+   (`cargo xtask gate release --no-snapshots`); the pixel-snapshot lanes
+   stay a local step at the cut ("A cut goes PR review", step 2).
 
 Any tier takes `--dry-run` to print its plan without running it; logs go
 to `gate-logs/<tier>-<timestamp>/`.
@@ -654,12 +760,82 @@ makes every worktree miss. Dev builds carry line tables only (no variable
 debug info; `--config profile.dev.debug=true` restores it for a debugger).
 
 **GitHub Actions minutes are budgeted** (3000/month; Windows bills 2x,
-macOS 10x). Nothing runs on push or PR: every gate tier runs locally
-through `cargo xtask gate`. GitHub runs only `release.yml` on a pushed tag
-(the build that publishes the artifact). `ci.yml` and `nightly.yml` are
-manual (`workflow_dispatch`) for the rare case a clean-machine run is
-wanted. Never add a `push`, `pull_request` or `schedule` trigger without
-the user's say-so.
+macOS 10x). Nothing runs on push or PR: the quick and batch tiers run
+locally through `cargo xtask gate`. GitHub runs `release.yml` for a cut
+tag (the build that publishes the artifact), and `cut.yml` (#1413) runs
+the release tier of a cut on the self-hosted cut runner (below), which
+bills no minutes; `cut.yml` starts `release.yml`, it does not replace it.
+Billed minutes of one cut: `cut.yml` 0 (self-hosted); `release.yml` about
+230 by v0.18.0's job times (Linux jobs ~50, Windows 10 x2, macOS 16 x10) -
+**measured cut: to be filled in from the first `cut.yml` cut's release
+run (Actions -> the run -> Usage)**. `aur-package.yml` is a job
+`release.yml` calls. The manual `ci.yml` and `nightly.yml` are gone (user,
+2026-11-13: "so we can remove ci.yml and nightly.yml as a docs change."):
+they were all but unused. Triggers stay `workflow_dispatch` (plus `release.yml`'s tag push): never
+add a `push`, `pull_request` or `schedule` trigger without the user's
+say-so, and never any trigger a fork PR can fire on a workflow whose jobs
+run on the self-hosted runner (maintainer, 2026-11-13: a public repo's
+fork PR must not run code on the maintainer's machine).
+
+**The cut runner** (#1413; maintainer, 2026-11-13: "That test and cut
+runner should be linux and it can only run on self hosted agents").
+`cut.yml`'s jobs run on `runs-on: [self-hosted, linux]`, never on a
+GitHub-hosted runner. What the machine needs:
+- Linux x86-64, registered to NeoTech/Camcraft at repo level with the
+  labels `self-hosted`, `Linux`, `X64` (an extra name label is fine);
+  sized for 16 cores and ~64 GB RAM, fewer cores work, slower.
+- Disk: at least 100 GB free for the work dir (a clean `target/` with the
+  release heavy lanes is 20-30 GB) plus the sccache cache.
+- The Rust toolchain on the runner service's PATH (`~/.cargo/bin`, a
+  stable rustc that builds the workspace), `git`, `gh`, and the Linux
+  build packages `release.yml`'s linux job installs (`pkg-config`,
+  `libwayland-dev`, `libxkbcommon-dev`, `libx11-dev`). The UI suites open
+  windows: install `xvfb` (the workflow wraps the gate in `xvfb-run -a`
+  when no display is set) and Mesa's software drivers
+  (`mesa-vulkan-drivers`, `libgl1-mesa-dri`) for a GPU-less adapter.
+- sccache: `RUSTC_WRAPPER` set to the sccache binary and
+  `SCCACHE_CACHE_SIZE` (e.g. 40G) in the runner's `.env`. Never set
+  `CARGO_TARGET_DIR` ("Shared compile cache"): each run builds in the
+  workspace's own `target/`, which `actions/checkout` cleans, and the
+  compile cache makes that cheap.
+- Registration: the maintainer creates a token (Settings -> Actions ->
+  Runners -> New self-hosted runner, Linux x64), then in the runner
+  directory `./config.sh --unattended --url
+  https://github.com/NeoTech/Camcraft --token <token> --name <name>
+  --labels <extra labels> --work <work dir>`, and runs it as a service
+  (`./svc.sh install`, or a user systemd unit with linger enabled so it
+  survives logout).
+- Safety: run it as an unprivileged account (no passwordless sudo; the
+  `docker` group is root-equivalent), keep "Require approval for all
+  outside collaborators" on for fork PR workflows (Settings -> Actions ->
+  General), and never approve a fork PR's workflow run that adds or
+  changes a file under `.github/workflows/` - such a file could name
+  `self-hosted`.
+
+**The PR test runner** (#1420; maintainer, 2026-11-13: "then that is the
+decision, workflow_dispatch"). `pr-test.yml` runs a PR review's build and
+tests on the maintainer's self-hosted Linux runner (no billed minutes)
+instead of a 10-20 GB worktree on the reviewer's machine. It has a
+`workflow_dispatch` trigger only (inputs: the PR number and the head SHA
+the reviewer read), a read-only token and no secrets; it checks out
+`refs/pull/<N>/head`, refuses any other head, refuses a diff touching
+`build.rs`, `.github/`, `scripts/`, a `.cargo/` directory at any depth, a
+`Cargo.toml`/`Cargo.lock`, a toolchain file or `xtask/` (listed with
+`--no-renames`), trial-merges with main and runs `cargo xtask gate
+quick --base origin/main` plus clippy on the touched crates (ui suites under
+`xvfb-run` with Mesa's software drivers, the cut runner's setup from issue
+1413). Only the PR-reviewer agent starts it, after reading the diff, and
+only for a collaborator's PR ("Collaborators only", maintainer, 2026-11-13;
+the workflow checks the author's push access itself and refuses otherwise,
+other PRs build locally) when a runner is online and no cut is using it; a "read, not built" PR
+is never sent. With no runner, or a run that is cancelled, times out or
+never starts, the review builds locally or says "not built" - never "pass".
+The job targets its own runner label (`camcraft-pr-test`) under its own OS
+user, HOME, cargo home and sccache dir, never shared with the cut/release
+runner of issue 1413 ("Separate runner/user", same date). The refusal list
+does not stop hostile test code: that is why only collaborators' PRs run.
+Windows-only readings (`cfg(windows)`, per-OS pinned values) still run
+locally for the touched suites.
 
 **Test the change, not everything.** A fix is proved by the test(s) that pin
 it, run one by one: `cargo xtask gate test <name> [--crate c] [--binary b]
@@ -793,7 +969,9 @@ calendar. `release.yml` builds and publishes on `vX.Y.0` tags only (~30-40
 billed Actions minutes each); PRs run no Actions (no `pull_request`
 trigger), so the PR flow costs no minutes.
 
-**Fixes are tested in the background.** After a fix merges, the main
+**Fixes are tested in the background.** After a fix merges (or, one gate
+per batch since 2026-11-12, after a merge batch of "Refresh only at merge
+time" as a whole, not after each merge), the main
 session dispatches a gate-runner subagent to run the batch tier on
 `origin/main` in the MAIN checkout, reusing its `target/` - never a fresh
 worktree, whose own ~25 GB `target/` once filled the disk - and does not
@@ -808,7 +986,7 @@ only when no gate or cut is running and it is past ~60 GB. A red result is a new
 gouge, else `P2`, `source:agent`) naming the failing tests and the merge
 that broke them. A red result does not revert the merge by itself; the
 issue is worked in the normal order, and a minor/major cut does not start
-while any `P1` or `P2` issue is open (a `P3` or lower never holds one). The full release tier runs only at a
+while any `P1` or `P2` issue is open (checked once, at the start of the cut; a `P3` or lower never holds one). The full release tier runs only at a
 minor/major cut. A fix-only stretch produces no build; to hand-test one, run
 `cargo xtask release --version <next> --no-tag --skip-gate` (or the wrapper
 `scripts/release.ps1 -Version <next> -NoTag -SkipGate`) locally on a scratch
@@ -824,15 +1002,29 @@ a tag"):
    review by a subagent that did not write it (`/code-review` on the PR, or
    a reviewer briefed with the diff, not the author's conclusion); findings
    are fixed on that branch and pushed. A PR that no longer merges cleanly
-   takes `git merge origin/main` on its branch (an older branch that still
-   appends to `RECOMMENDED.md` keeps both sides), is re-gated (quick), and
-   pushed. Then
+   is refreshed at merge time, in the order `cargo xtask merge-plan` gives
+   ("Refresh only at merge time"): `git merge origin/main` on its branch (an
+   older branch that still appends to `RECOMMENDED.md` keeps both sides), is
+   re-gated (quick), and pushed. Then
    `gh pr merge M --merge --delete-branch` - merge commits, never squash or
    rebase, so branch commits keep the hashes the issue comments name. A
    worktree still holding the branch is removed first (the local delete
    fails otherwise). From step 1 to the tag, nothing else merges to main. Stacked PRs: retarget each child to `main`
    before merging its parent (Issue Law, "Overlapping issues stack"), then
    merge parent-first.
+   **Start condition** (maintainer, 2026-11-13, in chat, after the v0.19.0
+   cut: "We should as a rule not let P1/P2s coming in after cut - force a
+   restart as its a ~2 hour job"; #1424): before this step, the session
+   checks that no `P1` or `P2` issue is open and records the UTC start time
+   and that list (none) in the release PR body. A `P1` or `P2` issue filed
+   after that moment does not restart the cut and does not enter it: the cut
+   finishes on the tree that passed the release gate, the issue is named
+   under "Known issues" (step 2 and the release PR comment, step 3), and its
+   fix merges after the tag and ships in the next minor. Only the maintainer
+   can stop a cut for it; no agent stops or restarts a cut for a late issue.
+   An agent that finds a late `P1` (unsafe or wrong output) tells the
+   maintainer in one line and goes on. Failures of the cut's own release gate
+   are not late issues: they are fixed in the cut as before.
 2. **Release branch.** Sync main (`git pull --ff-only`), then
    `git switch -c release/vX.Y.Z`. The version is the highest bump among
    the commits since the last tag (table above). Run
@@ -841,28 +1033,72 @@ a tag"):
    removes them; it goes in the same docs commit). Write `RELEASE_NOTES.md`
    and the `CHANGELOG.md` rows for every PR merged since that tag (one per
    behaviour PR, from its `Changelog:` line, plus any `Unreleased` rows).
+   Any `P1` or `P2` filed after the start (step 1) goes under a "Known
+   issues" section of the release notes, by number and title.
    The release notes also get a short "Process changes" section listing
    each `PROCESS_VERSION` since the previous tag (taken from the pinned
    issue #681). Commit all of it as `docs: X.Y.Z release notes;
    changelog`; then `cargo xtask release --version X.Y.Z --no-tag
-   --installer` (Windows; `scripts/release.ps1 -Version X.Y.Z -NoTag
-   -Installer` is the same command through its wrapper; on macOS and Linux
-   it hands packaging to `scripts/package-*.sh` and refuses `--installer`)
-   - it runs the release gate tier on that tree (pass `--skip-gate` only if
-   this exact tree already passed it), commits the version bump, builds
-   the zip and installer, and makes no tag (it refuses `--no-tag` on main).
-3. **Release PR.** `git push -u origin release/vX.Y.Z`,
-   `gh pr create --base main --title "chore(release): X.Y.Z"`, reviewed like
-   any PR. Record the branch tip first (`tip=$(git rev-parse
-   release/vX.Y.Z)` - `--delete-branch` removes the name), then
-   `gh pr merge --merge --delete-branch`.
-4. **Tag the release merge commit.** Sync main; `m=$(git rev-parse main)`
-   is the release PR's merge commit (nothing else merged since step 1).
-   `git diff $tip $m` must be empty - the zip's tree is the tagged tree. Then
-   `git tag -a vX.Y.Z -m "CamCraft X.Y.Z" $m` and `git push origin vX.Y.Z`.
-   If the diff is not empty, do not tag: something reached main mid-cut;
-   start the cut again from step 2 on a fresh release branch. Comment
-   `shipped in vX.Y.Z` on every issue the cut closed.
+   --skip-gate` commits the version bump (the release gate runs on the cut
+   runner, step 3) and makes no tag (it refuses `--no-tag` on main). Its
+   local zip (and, on Windows with `--installer`, installer) is a
+   hand-test build only - the published zip, installer and packages are
+   built by `release.yml` from the tag - and a packaging failure after its
+   phase 4 does not undo the bump commit. Two checks stay local, on
+   Windows, before the push: the pixel-snapshot lanes (`cargo test -p
+   camcraft-ui --lib -- --ignored snapshot` and `cargo test -p camcraft-ui
+   --test gpu_render -- --ignored snapshot`, CWD `crates/ui`; the goldens
+   were made on Windows and are regenerated here after a look at the
+   `.diff.png`), and, optionally, the Windows arms of per-OS pinned
+   readings (issue 1402's move counts in `crates/app/tests/pocket3d_hsm.rs`
+   and the like: the Linux runner checks only the Linux arm, and a Windows
+   arm nobody runs drifts until the next Windows check). A cut without a
+   Windows machine skips both and says so in the release PR.
+3. **Release gate on the cut runner, then the release PR.** `git push -u
+   origin release/vX.Y.Z`, then start the gate: Actions -> Cut -> Run
+   workflow, `version` X.Y.Z, `stage` gate (`gh workflow run cut.yml -f
+   version=X.Y.Z -f stage=gate`). It checks out `release/vX.Y.Z`, refuses
+   a branch whose `Cargo.toml` or `RELEASE_NOTES.md` does not name X.Y.Z
+   or whose tag exists, runs `cargo xtask gate release --no-snapshots`,
+   uploads `gate-logs/` as an artifact either way, and, green, records the
+   tested commit. Red: nothing is tagged; fix on the release branch, push,
+   and start the gate again. The `dry_run` input prints the plan only (try
+   a new runner with it). While the gate runs, `gh pr create --base main
+   --title "chore(release): X.Y.Z"`, reviewed like any PR; once the gate is
+   green and the PR reviewed, `gh pr merge --merge --delete-branch`. The
+   release PR body carries the start-condition record (step 1); a comment
+   on it names each `P1`/`P2` filed after the start, as "Known issues". No
+   push to the branch after the green gate: the tag stage refuses a merge
+   whose tree is not the gated tree.
+4. **Tag the release merge commit - on the cut runner.** Start Cut again
+   with `stage` tag (`gh workflow run cut.yml -f version=X.Y.Z -f
+   stage=tag`). It takes `tip`, the commit of the newest green gate run
+   for X.Y.Z, and `m`, main's head; it refuses unless `m` is the release
+   PR's merge of `tip` (`m^2 == tip`: nothing else merged since step 1),
+   `git diff $tip $m` is empty (the gated tree is the tagged tree) and the
+   tag is free. Then it makes `git tag -a vX.Y.Z -m "CamCraft X.Y.Z" $m`,
+   pushes it, and starts the existing `release.yml` on the tag (`gh
+   workflow run release.yml --ref vX.Y.Z`: a tag pushed with the workflow
+   token starts no workflow by itself, and on a tag ref `release.yml`
+   publishes exactly as on a pushed tag). `dry_run` runs every check and
+   tags nothing. A refusal means something reached main mid-cut or the
+   branch moved after the gate: start the cut again from step 2 on a fresh
+   release branch. The local cut (gate locally, then `git tag` and `git
+   push origin vX.Y.Z` by hand, which fires `release.yml` on the push)
+   stays the fallback when the runner is down, with the same empty-diff
+   rule. Comment `shipped in vX.Y.Z` on every issue the cut closed.
+5. **Check the documentation site** (#688). The same tag run regenerates
+   the Zola site in `site/` from the tagged tree and deploys it to GitHub
+   Pages (`release.yml` jobs `site` and `pages`; `pages` waits for
+   `publish`, so the site's download links never point at a missing
+   release). The browser build (`wasm`, #1103) is served under `/app/`;
+   a failed wasm build leaves `/app/` as the "not part of this copy" page
+   and a warning, not a failed cut. Nothing is committed for it and no
+   trigger is added. The cut is done once the run's `pages` job is green
+   and `https://neotech.github.io/Camcraft/` shows "CamCraft X.Y.Z"; a
+   red `pages` job is re-run (Actions "Re-run failed jobs"), never fixed
+   by moving the tag. Preview locally with `zola build` in `site/`
+   (`site/README.md`).
 
 **`main` is protected on GitHub** (user, 2026-11-07: "so we don't get
 unauthorized pushes into main instead they follow the rules"): every change
@@ -879,13 +1115,21 @@ use of the /review-prs into agents.md"). A pull request from a fork gets a
 review by the `PR-reviewer` agent (`.claude/agents/PR-reviewer.md`),
 dispatched by the project skill `/review-prs` (`.claude/skills/review-prs/`) -
 run on demand (`/review-prs`, or `/review-prs <N>` for one PR) and on a loop
-(`/loop 10m /review-prs`, every 10 minutes). The agent trial-merges the PR with current main in
-its own worktree, builds, runs the suites it touches and clippy, checks this
+(`/loop 10m /review-prs`, every 10 minutes). The agent trial-merges the PR with current main
+and builds it, runs the suites it touches and clippy - on the self-hosted
+runner through `pr-test.yml` when one is online ("The PR test runner"), else
+in its own worktree - checks this
 file's laws, and posts a plain review **comment** whose first line is
-`<!-- pr-reviewer: <head sha> -->` (the marker that stops a second review of
+`<!-- pr-reviewer: <head sha> -->` (counted only when its author is a collaborator, see "Only collaborators' reviews count"; the marker that stops a second review of
 the same push), and sets the review label (below). It never approves, requests changes, merges or pushes:
 the user approves and merges an outside PR by hand ("make sure u leave a
-comment and allow us to approve it manually"). **Never two PR reviews at
+comment and allow us to approve it manually") - that stays for the PRs of
+accounts that are not collaborators; a collaborator's PR is handled like our
+own: reviewed here, then merged by any collaborator's session through
+`/merge-ready` (maintainer, 2026-11-12, "Both collaborators" may merge; cuts
+and tags stay with the maintainer). A merge batch is run with `/merge-ready`
+(`.claude/skills/merge-ready/`), which plans the order with `cargo xtask
+merge-plan`. **Never two PR reviews at
 once** ("make sure we are not running concurrent PR reviews"): one PR per
 `/review-prs` run, guarded by the lock `.claude/pr-review.lock` (`<N> <sha>
 <UTC>`) - a run that finds a lock younger than 90 min stops; an older one is
@@ -909,9 +1153,10 @@ retargeting any stacked child to `main` first),
 never while a cut is between step 1 and its tag.
 
 **Every cut tag is published.** A release cut is not done until its tag is
-on GitHub: the tag is made on `main` after the release PR merges (step 4)
-and pushed at once - `git push origin vX.Y.0` - which fires `release.yml`
-and attaches the built artifact to a GitHub release. A tag that exists only
+on GitHub: the tag is made on `main` after the release PR merges (step 4),
+by `cut.yml`'s tag stage, which pushes it and starts `release.yml` on it
+(by hand, `git push origin vX.Y.0` fires `release.yml` itself), and
+`release.yml` attaches the built artifact to a GitHub release. A tag that exists only
 locally is an unfinished cut. Never move or re-push an existing tag; a fix
 after a cut merges to `main` and ships in the next minor. Never force-push -
 not `main`, not a branch with an open PR.

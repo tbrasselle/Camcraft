@@ -39,7 +39,11 @@ order of the steps. Load the `gh-issues` skill for the `gh` mechanics.
   the Prime Directive (no `unwrap`/`expect`/`panic!` outside tests; refuse
   by name), everything is a command (+ MCP tool or a filed `MCP:` issue),
   the 400-line law, layering, provenance line on new modules, no snapshot
-  PNG changes.
+  PNG changes, and the three placement rules (AGENTS.md "Code shape" and
+  "Testing"): a new test lives in the lowest crate that provides its imports;
+  no new `camcraft-*` dependency without a `docs/decisions/` entry listing
+  the items and what rebuilds; new code in `crates/app/src` only reads or
+  writes the ECS world, project file, a command, MCP or the CLI.
 - A pinning test for the change; a decision taken unattended goes in
   `docs/decisions/N-<slug>.md`.
 

@@ -1,6 +1,6 @@
 ---
 name: review-prs
-description: Find open pull requests on NeoTech/Camcraft that need a review (third-party PRs from forks, or any PR whose current head has not been reviewed yet) and dispatch the PR-reviewer agent on each, one at a time. Posts review COMMENTS only - never approves or merges. Use when asked to "review the PRs", "check for new pull requests", "review PR #N", or from the periodic loop (`/loop 10m /review-prs`).
+description: Find open pull requests on NeoTech/Camcraft that need a review (third-party PRs from forks, or any PR whose current head has not been reviewed yet) and dispatch the PR-reviewer agent on each, one at a time (it builds on the self-hosted Linux runner through pr-test.yml when one is online, else locally). Posts review COMMENTS only - never approves or merges. Use when asked to "review the PRs", "check for new pull requests", "review PR #N", or from the periodic loop (`/loop 10m /review-prs`).
 ---
 
 # Review open pull requests
@@ -49,21 +49,32 @@ and go to step 2.
 Otherwise list open PRs that are ready for review (non-draft) with their head SHA and reviews:
 
 ```bash
+export COLLABS=$(gh api repos/NeoTech/Camcraft/collaborators --jq '.[] | select(.permissions.push) | .login' | tr '\n' ' ')
 gh pr list --repo NeoTech/Camcraft --state open --limit 100 \
   --json number,isDraft,author,headRepositoryOwner,headRefOid,reviews,comments \
-  --jq '.[] | select(.isDraft|not)
+  --jq '(env.COLLABS | split(" ")) as $c
+        | .[] | select(.isDraft|not)
         | .headRefOid as $s
-        | select([.reviews[].body, .comments[].body] | map(select(contains("<!-- pr-reviewer: " + $s))) | length == 0)
+        | ([.reviews[] | select(.author.login as $a | $c | index($a)) | .body]
+           + [.comments[] | select(.author.login as $a | $c | index($a)) | .body]) as $marks
+        | select($marks | map(select(contains("<!-- pr-reviewer: " + $s))) | length == 0)
         | "\(.number) \(.author.login) \($s)"'
 ```
 
-Every line printed is a PR that needs a review:
+Only a collaborator's marker counts (AGENTS.md "Only collaborators' reviews
+count", 2026-11-12: "Any collaborator review counts"; it replaced the
+owner-only rule of #1207): a `pr-reviewer` marker posted by an account that
+is not a collaborator is not a review of this head. Every line printed
+is a PR that needs a review:
 - it is ready for review - a fork PR or one of our own (user, 2026-11-08:
   "All PR*s made by owner should be reviewd and tagged"); our own PRs are
   flagged ready by a quick pass (AGENTS.md "Every PR opens as a draft") and
   get their full review here;
-- no review or comment carries the marker for its current head SHA (a new push
-  after our last review means the contributor answered - review again).
+- no review or comment by a collaborator carries the marker for its
+  current head SHA (a new push after our last review means the contributor
+  answered - review again), unless the new commits since that marker are only
+  clean merges of main: `cargo xtask merge-plan --delta <N> --reviewed <sha>`
+  says SAME, and the review stands (no dispatch; step 2b restores the label).
 
 Nothing to review: say "no PRs need review" in one line and stop (this is the
 common case on a loop tick - keep it quiet).
@@ -81,6 +92,22 @@ takes the next. Never launch two `PR-reviewer` agents at once.
    the agent failed to) and that `../cc-pr<N>-review` is removed. Do not poll
    while it runs.
 
+**Build on the runner when one is online** (#1420; maintainer, 2026-11-13:
+"then that is the decision, workflow_dispatch"). The agent, not this skill,
+decides where the PR is built, because the decision needs the diff it reads
+(PR-reviewer step 2b): with a self-hosted Linux runner online, no cut on it,
+a PR written by a collaborator with push access ("Collaborators only"; the
+workflow refuses any other author, which builds locally) and a PR that is
+not "read, not built", it starts `pr-test.yml`
+(`gh workflow run pr-test.yml -f pr=<N> -f sha=<head>`, `workflow_dispatch`
+only), waits for the run and reads its per-binary result, and makes no
+worktree or `target/`; otherwise it builds locally as before. A run that is
+cancelled, times out or never starts is no verdict: the agent builds
+locally or says "not built", never "pass". The review comment names where
+it was built and links the run. This skill never starts the workflow
+itself, and nothing here adds a trigger to it. The lock above holds either
+way: one review at a time, whether its build runs here or on the runner.
+
 ## 2b. Labels - one colour per state
 
 Every reviewed PR carries exactly the labels its state calls for (user,
@@ -89,7 +116,7 @@ we can find em"):
 
 | Label | Colour | Means |
 |---|---|---|
-| `merge-ready` | green | review clean AND merges cleanly with main - the owner can merge now |
+| `merge-ready` | green | review clean AND merges cleanly with main - a collaborator can merge now |
 | `needs-rework` | red | the review found blocking items |
 | `conflicts` | orange | conflicts with main - needs a branch refresh (`git merge origin/main`) |
 | `needs-maintainer` | yellow | reviewed, no blockers, but the owner must decide first: a new dependency, or a `build.rs` / scripts / `.github` change the reviewer reads and does not build ("Not built - needs a maintainer look") |
@@ -120,11 +147,37 @@ ready again for a fresh review (AGENTS.md "Every PR opens as a draft").
 That applies to our own PRs; a fork contributor's PR is left as they set
 it, and the review comment says what to fix.
 
-Whoever refreshes a branch re-reads `mergeable` after the push: once it is
-`MERGEABLE`, drop `conflicts` and restore `merge-ready` if the last review
-was clean. Merging a PR can turn others `CONFLICTING`, so each run also
-re-checks every open PR labelled `merge-ready` and swaps any that now
-conflict to `conflicts`.
+A conflicting PR of ours that waits for the merge batch therefore stays a
+draft until merge time. The merging session refreshes it, and then flags it
+ready (`gh pr ready <N>`) right before the merge, with one PR comment naming
+the `--delta` class (SAME, MECHANICAL or DELTA) - AGENTS.md "Every PR opens
+as a draft", decided in #1221 ("Refresh only at merge time"). The review
+skill does not flag ready; it only reads the state.
+
+Whoever refreshes a branch (at merge time, AGENTS.md "Refresh only at merge
+time") re-reads `mergeable` after the push: once it is `MERGEABLE`, drop
+`conflicts` and restore `merge-ready` if the last review was clean. Run
+`cargo xtask merge-plan --delta <PR> --reviewed <sha>` on the merge: SAME
+(only merges of main with an empty remerge-diff) keeps the review with no
+agent, MECHANICAL is read by the merging session, DELTA gets a delta review,
+NEW CODE a full review (AGENTS.md "A clean merge of main keeps its review").
+Merging a PR can turn others `CONFLICTING`, so each run also re-checks
+every open PR labelled `merge-ready` and swaps any that now conflict to
+`conflicts`.
+
+A requested change that is still open on the current head, or `merge-ready`
+beside a collaborator review that requests changes, is a disagreement
+(AGENTS.md "Only collaborators' reviews count"): no agent removes either
+label.
+
+Only collaborators set the review labels and the markers that count
+(AGENTS.md "Only collaborators' reviews count"; the collaborator list is
+`$COLLABS` above). A `merge-ready` label with no collaborator-authored
+`pr-reviewer` marker that still stands for the PR - its
+current head, or an earlier head that `--delta` classes SAME or MECHANICAL
+against it - is removed, with the one-line comment `merge-ready removed: no
+review by a collaborator at <sha7>`. A label set by a non-collaborator
+is not a review.
 
 ## 2c. Token cost comment - when a PR turns merge-ready
 

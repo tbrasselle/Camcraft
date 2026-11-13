@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/app", "crates/cl", "crates/motion", "crates/post", "crates/sim",
-  "crates/tools", "crates/ui", "crates/geometry", "crates/kernel"]
+  "crates/tools", "crates/ui", "crates/geometry", "crates/kernel", "xtask"]
 
 [workspace.package]
 version = "0.15.0"
